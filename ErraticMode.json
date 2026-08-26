@@ -1,0 +1,21 @@
+{
+    "id": "ErraticMode",
+    "name": "Erratic Mode",
+    "author": ["plaxerx"],
+    "description": "A new mode present in the challenges tab! Start a run on a random deck (and sleeve if CardSleeves is installed) and stake with up to 8 rolled mutations from a pool of 50.",
+    "prefix": "em",
+    "main_file": "main.lua",
+    "icon_path": "em_icon.png",
+    "version": "0.1.0",
+    "priority": 5,
+    "badge_colour": "7A3FB8",
+    "badge_text_colour": "FFFFFF",
+    "display_name": "Erratic Mode",
+    "dependencies": [
+        "Steamodded (>=1.0.0~BETA-0400)"
+    ],
+    "conflicts": [
+        "MoarVanillaPlease"
+    ],
+    "provides": []
+}
