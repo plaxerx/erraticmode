@@ -96,10 +96,10 @@ mut{ key = 'poverty', name = 'Poverty', category = 'Challenge',
          start_joker('j_todo_list', 'negative')
      end }
 
-mut{ key = 'inflation', name = 'Inflation', category = 'Challenge',
+mut{ key = 'reroll_creep', name = 'Reroll Creep', category = 'Challenge',
      text = { 'Each reroll raises future', 'base reroll cost by {C:money}$1{}' },
      conflicts = { 'everything_must_go' },
-     apply = function() mods().inflation = true end }  
+     apply = function() mods().em_mut_reroll_creep = true end }
 
 mut{ key = 'no_refunds', name = 'No Refunds', category = 'Challenge',
      text = { 'Sell value of all items is {C:money}$0{}' },
@@ -139,11 +139,13 @@ mut{ key = 'middle_child', name = 'Middle Child Syndrome', category = 'Challenge
 mut{ key = 'no_magic', name = 'No Magic', category = 'Challenge',
      text = { 'No {C:tarot}Tarot{} cards' },
      conflicts = { 'arcane' },
+     bans = { 'Tarot' },
      apply = function() mods().em_mut_no_tarots = true end }
 
 mut{ key = 'no_science', name = 'No Science', category = 'Challenge',
      text = { 'No {C:planet}Planet{} cards' },
      conflicts = { 'astronomer' },
+     bans = { 'Planet' },
      apply = function() mods().em_mut_no_planets = true end }
 
 mut{ key = 'go_with_the_flow', name = 'Go with the Flow', category = 'Challenge',
@@ -173,7 +175,7 @@ mut{ key = 'mercy_rule', name = 'Mercy Rule', category = 'Boon',
 
 mut{ key = 'everything_must_go', name = 'Everything Must Go', category = 'Boon',
      text = { 'Everything is {C:attention}50%{} cheaper', '{C:red}-1{} Joker slot' },
-     conflicts = { 'inflation', 'high_roller', 'no_refunds', 'minimalist', 'collector', 'card_pulls' },
+     conflicts = { 'reroll_creep', 'high_roller', 'no_refunds', 'minimalist', 'collector', 'card_pulls' },
      apply = function()
          mods().em_mut_price_mult = 0.5
          sp().joker_slots = math.max(1, (sp().joker_slots or 5) - 1)
@@ -188,7 +190,7 @@ mut{ key = 'collector', name = 'Collector', category = 'Boon',
      end }
 
 mut{ key = 'heavy_deck', name = 'Heavy Deck', category = 'Boon',
-     text = { 'Start with {C:attention}+48{} cards,', 'all {C:attention}randomly enhanced{}' },
+     text = { 'Start with {C:attention}+48{} randomly', '{C:attention}enhanced{} cards' },
      conflicts = { 'thin_deck', 'broken_deck', 'lucky_seven' },
      apply = function()
          mods().em_mut_deck_delta = 48
@@ -333,6 +335,7 @@ mut{ key = 'aggressive', name = 'Aggressive', category = 'Twist',
 mut{ key = 'spectral_world', name = 'Spectral World', category = 'Twist',
      text = { 'Only {C:spectral}Spectral{} cards appear' },
      conflicts = { 'arcane', 'astronomer', 'no_magic', 'no_science' },
+     bans = { 'Tarot', 'Planet' },
      apply = function()
          mods().em_mut_no_tarots = true
          mods().em_mut_no_planets = true
@@ -481,17 +484,41 @@ function Blind:set_blind(blind, reset, silent)
     end
 end
 
+local function hidden(slot)
+    return (slot == 'Small' and mm('em_mut_no_small')) or (slot == 'Big' and mm('em_mut_no_big'))
+end
+
+-- blind_on_deck must name a blind the select screen built a box for, or nothing is clickable.
+local function settle_blind_on_deck(select_next)
+    local bs = G.GAME and G.GAME.round_resets and G.GAME.round_resets.blind_states
+    local deck = G.GAME and G.GAME.blind_on_deck
+    if not (bs and deck and hidden(deck)) then return end
+    bs[deck] = 'Hide'
+    local nxt = (deck == 'Small' and not hidden('Big')) and 'Big' or 'Boss'
+    if select_next then bs[nxt] = 'Select' end
+    G.GAME.blind_on_deck = nxt
+end
+
 local function apply_blind_hides()
     local bs = G.GAME and G.GAME.round_resets and G.GAME.round_resets.blind_states
     if not bs then return end
     if mm('em_mut_no_small') then bs.Small = 'Hide' end
     if mm('em_mut_no_big') then bs.Big = 'Hide' end
+    settle_blind_on_deck(false)
 end
 
 local em_mut_reset_blinds = reset_blinds
 function reset_blinds()
     em_mut_reset_blinds()
     apply_blind_hides()
+end
+
+-- Vanilla skip steps Small -> Big -> Boss without checking for 'Hide': skipping Small under
+-- Big Brother lands on the hidden Big Blind, which has no box on screen, and softlocks.
+local em_mut_skip_blind = G.FUNCS.skip_blind
+G.FUNCS.skip_blind = function(e)
+    em_mut_skip_blind(e)
+    settle_blind_on_deck(true)
 end
 
 local em_mut_get_new_boss = get_new_boss -- Double Boss
@@ -513,9 +540,15 @@ local em_mut_calc_reroll = calculate_reroll_cost
 function calculate_reroll_cost(skip_increment)
     em_mut_calc_reroll(skip_increment)
     local cr = G.GAME and G.GAME.current_round
-    if mm('em_mut_reroll_surcharge') and cr and (EM.plain(cr.free_rerolls) or 0) <= 0 then
-        local c = EM.plain(cr.reroll_cost) or 0
-        cr.reroll_cost = c + mm('em_mut_reroll_surcharge')
+    if not cr then return end
+    -- Vanilla passes skip_increment = falsy only after a paid reroll.
+    if mm('em_mut_reroll_creep') and not skip_increment then
+        G.GAME.em_mut_reroll_creep = (G.GAME.em_mut_reroll_creep or 0) + 1
+    end
+    if (EM.plain(cr.free_rerolls) or 0) > 0 then return end
+    local extra = (mm('em_mut_reroll_surcharge') or 0) + (mm('em_mut_reroll_creep') and G.GAME.em_mut_reroll_creep or 0)
+    if extra ~= 0 then
+        cr.reroll_cost = (EM.plain(cr.reroll_cost) or 0) + extra
     end
 end
 
@@ -554,7 +587,8 @@ function Card:set_cost()
 
     local set = self.ability and self.ability.set
     local c = EM.plain(self.cost) or 0
-    if c > 0 then
+    -- 0 is a flag (Coupon, Astronomer) and Rentals are pinned to $1 by vanilla; neither is ours to move.
+    if c > 0 and not (self.ability and self.ability.rental) then
         if mm('em_mut_price_mult') then c = c * mm('em_mut_price_mult') end
         if mm('em_mut_nonpack_mult') and set ~= 'Booster' then c = c * mm('em_mut_nonpack_mult') end
         if mm('em_mut_pack_price_mult') and set == 'Booster' then c = c * mm('em_mut_pack_price_mult') end
@@ -572,10 +606,12 @@ function Card:set_cost()
     self.sell_cost_label = self.facing == 'back' and '?' or self.sell_cost
 end
 
+local RARITY_NAME = { 'Common', 'Uncommon', 'Rare', 'Legendary' }   -- poll_rarity's numbers
+
 local BANNED_RARITY = {
     em_mut_no_common   = { Common = true },
     em_mut_no_uncommon = { Uncommon = true },
-    em_mut_no_rare     = { Rare = true, Legendary = true },
+    em_mut_no_rare     = { Rare = true },
 }
 
 local em_mut_poll_rarity = SMODS.poll_rarity
@@ -598,16 +634,47 @@ function SMODS.poll_rarity(_pool_key, _rand_key)
     end
     if #kept == 0 then return em_mut_poll_rarity(_pool_key, _rand_key) end     -- Nothing left to roll would mean an empty pool and no Jokers at all; leave it alone.
 
-    local saved = ot.rarities
+    -- The result is still checked: a wrapper below this one can return a rarity without
+    -- reading the list (EndlessEngines' Royal Voucher returns Legendary outright).
+    local saved, r, failed = ot.rarities, nil, false
     ot.rarities = kept
-    local ok, r = pcall(em_mut_poll_rarity, _pool_key, _rand_key)
+    for _ = 1, 3 do
+        local ok, res = pcall(em_mut_poll_rarity, _pool_key, _rand_key)
+        if not ok then failed = true break end
+        if not ban[RARITY_NAME[res] or res] then r = res break end
+    end
     ot.rarities = saved   -- restored on the error path too, or every later poll is skewed
-    if not ok then return em_mut_poll_rarity(_pool_key, _rand_key) end
-    return r
+    if failed then return em_mut_poll_rarity(_pool_key, _rand_key) end
+    if r then return r end
+    local first = kept[1].key
+    for i, name in ipairs(RARITY_NAME) do
+        if name == first then return i end
+    end
+    return first
+end
+
+-- Banning every Tarot or Planet empties the pool, and get_current_pool then falls back to
+-- Strength / Pluto (common_events.lua:2454), so the shop's type roll must not land there.
+local em_mut_card_for_shop = create_card_for_shop
+function create_card_for_shop(area)
+    if not (mm('em_mut_no_tarots') or mm('em_mut_no_planets')) then return em_mut_card_for_shop(area) end
+    local tr, pr = G.GAME.tarot_rate, G.GAME.planet_rate
+    if mm('em_mut_no_tarots') then G.GAME.tarot_rate = 0 end
+    if mm('em_mut_no_planets') then G.GAME.planet_rate = 0 end
+    local ok, card = pcall(em_mut_card_for_shop, area)
+    G.GAME.tarot_rate, G.GAME.planet_rate = tr, pr
+    if not ok then error(card, 0) end
+    return card
 end
 
 local em_mut_create_card = create_card
 function create_card(_type, area, legendary, _rarity, skip_materialize, soulable, forced_key, key_append)
+    -- A banned forced key falls through to get_current_pool(_type), which errors on a nil type,
+    -- and SMODS.create_card{key=...} passes none (CardSleeves' starting consumables do this).
+    if _type == nil and forced_key and G.GAME and G.GAME.banned_keys
+        and G.GAME.banned_keys[forced_key] and G.P_CENTERS[forced_key] then
+        _type = G.P_CENTERS[forced_key].set
+    end
     local c = em_mut_create_card(_type, area, legendary, _rarity, skip_materialize, soulable, forced_key, key_append)
     if c and c.ability and c.ability.set == 'Joker' then
         if mm('em_mut_all_rental') and not c.ability.rental and c.set_rental then -- set_rental/set_eternal rather than a direct ability write
@@ -676,8 +743,10 @@ local function apply_hand_tweaks() -- Poker-hand base values, applied once the h
             h[k] = to_big and to_big(nv) or nv
         end
         for _, h in pairs(G.GAME.hands) do
-            local fc = 0.5 + pseudorandom('em_mut_chaos_c') * 1.5
-            local fm = 0.5 + pseudorandom('em_mut_chaos_m') * 1.5
+            -- Uniform in log space, so 0.5x and 2x are equally likely. A linear 0.5-2 roll
+            -- averages 1.25x per factor, a buff the text does not promise.
+            local fc = 2 ^ (pseudorandom('em_mut_chaos_c') * 2 - 1)
+            local fm = 2 ^ (pseudorandom('em_mut_chaos_m') * 2 - 1)
             put(h, 'chips', fc); put(h, 's_chips', fc)
             put(h, 'mult', fm);  put(h, 's_mult', fm)
         end
@@ -687,43 +756,14 @@ end
 --============================================================
 -- Deck rebuilds
 --============================================================
-local ENH = { 'm_bonus', 'm_mult', 'm_wild', 'm_glass', 'm_steel', 'm_gold', 'm_lucky' }
 local SEALS = { 'Red', 'Blue', 'Gold', 'Purple' }
 
 local function rebuild_deck()
     if not (G.playing_cards and #G.playing_cards > 0 and G.deck) then return end
 
-    if mm('em_mut_wild_deck') or mm('em_mut_all_enhanced') then
-        for _, c in ipairs(G.playing_cards) do
-            local key = mm('em_mut_wild_deck') and 'm_wild' or ENH[pseudorandom('em_mut_enh', 1, #ENH)]
-            if G.P_CENTERS[key] then c:set_ability(G.P_CENTERS[key], true, true) end
-        end
+    if mm('em_mut_wild_deck') and G.P_CENTERS.m_wild then
+        for _, c in ipairs(G.playing_cards) do c:set_ability(G.P_CENTERS.m_wild, true, true) end
     end
-    local function pick_cards(n) -- Pick N distinct cards, shared by the random-seal / random-edition mutations.
-        local idx, out = {}, {}
-        for i = 1, #G.playing_cards do idx[i] = i end
-        for _ = 1, math.min(n, #idx) do
-            local pick = pseudorandom('em_mut_pick', 1, #idx)
-            out[#out + 1] = G.playing_cards[idx[pick]]
-            table.remove(idx, pick)
-        end
-        return out
-    end
-
-    if mm('em_mut_random_seals') then -- Broken Deck: N random cards get a random seal.
-        for _, c in ipairs(pick_cards(mm('em_mut_random_seals'))) do
-            c:set_seal(SEALS[pseudorandom('em_mut_seal', 1, #SEALS)], true, true)
-        end
-    end
-
-    if mm('em_mut_random_editions') then -- Limited Edition: N random cards get a random edition.
-        local EDS = { 'e_foil', 'e_holo', 'e_polychrome', 'e_negative' }
-        for _, c in ipairs(pick_cards(mm('em_mut_random_editions'))) do
-            local ek = EDS[pseudorandom('em_mut_edition', 1, #EDS)]
-            if c.set_edition then c:set_edition({ [ek:gsub('^e_', '')] = true }, true, true) end
-        end
-    end
-
     if mm('em_mut_lucky_sevens') and G.P_CENTERS.m_lucky then -- Lucky Seven: every 7 becomes a Lucky card with a Red Seal.
         for _, c in ipairs(G.playing_cards) do
             if (c.get_id and c:get_id()) == 7 then
@@ -784,6 +824,10 @@ local function rebuild_deck()
                 local src = G.deck.cards[pseudorandom('em_mut_pad', 1, #G.deck.cards)]
                 if src then
                     local c = copy_card(src, nil, nil, nil)
+                    if mm('em_mut_all_enhanced') then -- Heavy Deck: vanilla's own enhancement pool and weights
+                        local ek = SMODS.poll_enhancement({ key = 'em_mut_enh', guaranteed = true })
+                        if ek and G.P_CENTERS[ek] then c:set_ability(G.P_CENTERS[ek], true, true) end
+                    end
                     c:add_to_deck()
                     G.deck:emplace(c)
                 end
@@ -795,6 +839,32 @@ local function rebuild_deck()
     for _, c in ipairs(G.deck.cards) do
         c.playing_card = #G.playing_cards + 1
         G.playing_cards[#G.playing_cards + 1] = c
+    end
+
+    -- After every add/remove above, so Courtless or Thin Deck can't take marked cards back
+    -- out and Heavy Deck can't copy them.
+    local function pick_cards(n)
+        local idx, out = {}, {}
+        for i = 1, #G.playing_cards do idx[i] = i end
+        for _ = 1, math.min(n, #idx) do
+            local pick = pseudorandom('em_mut_pick', 1, #idx)
+            out[#out + 1] = G.playing_cards[idx[pick]]
+            table.remove(idx, pick)
+        end
+        return out
+    end
+
+    if mm('em_mut_random_seals') then -- Broken Deck
+        for _, c in ipairs(pick_cards(mm('em_mut_random_seals'))) do
+            c:set_seal(SEALS[pseudorandom('em_mut_seal', 1, #SEALS)], true, true)
+        end
+    end
+
+    if mm('em_mut_random_editions') then -- Limited Edition: Aura's roll (base editions, no Negative)
+        for _, c in ipairs(pick_cards(mm('em_mut_random_editions'))) do
+            local ed = poll_edition('em_mut_edition', nil, true, true, { 'e_negative', 'e_polychrome', 'e_holo', 'e_foil' })
+            if ed and c.set_edition then c:set_edition(ed, true, true) end
+        end
     end
     G.deck:set_ranks()
 end
@@ -839,7 +909,7 @@ end
 local SP_FLOOR = { hands = 1, discards = 0, hand_size = 1, joker_slots = 0, consumable_slots = 0 }
 
 function EM.mutations_post_deck()
-    if not (G.GAME and G.GAME.em_mutations and #G.GAME.em_mutations > 0) then return end
+    if not (G.GAME and ((G.GAME.em_mutations and #G.GAME.em_mutations > 0) or G.GAME.em_flux)) then return end
     local sp = G.GAME.starting_params
     if sp then
         for field, floor_v in pairs(SP_FLOOR) do
@@ -860,10 +930,9 @@ function EM.mutations_finish()
         for _, j in ipairs(G.GAME.em_mut_jokers) do
             G.E_MANAGER:add_event(Event({ func = function()
                 if not G.P_CENTERS[j.k] then return true end
-                local card = create_card('Joker', G.jokers, nil, nil, nil, nil, j.k, 'em_mut')
-                if j.e and card.set_edition then card:set_edition({ [j.e] = true }, true, true) end
-                card:add_to_deck()
-                G.jokers:emplace(card)
+                -- add_joker sets the edition after add_to_deck, or Negative never grants its slot;
+                -- it skips create_card, so Eternal Kingdom's all_eternal is passed through by hand.
+                add_joker(j.k, j.e, true, mm('all_eternal'))
                 return true
             end }))
         end
@@ -886,6 +955,49 @@ local function mutation_count()
     return math.max(MUT_MIN, math.min(MUT_MAX, n))
 end
 
+-- Flux mode borrows EndlessEngines' own Flux code, so it only exists when that mod is loaded.
+local function flux_available()
+    return EEng ~= nil and type(EEng.flux_activate) == 'function'
+        and type(EEng.flux_destabilize) == 'function'
+end
+
+local function flux_text()
+    local cfg = EEng and EEng.CFG and EEng.CFG.flux or {}
+    local pool = EEng and EEng.FLUX_POOL or {}
+    return {
+        'Every value is {C:attention}randomized{} ({C:blue}' .. tostring(cfg.min or '?') .. 'X{} to {C:blue}'
+            .. tostring(cfg.max or '?') .. 'X{}):',
+        '{C:attention}Jokers{}, {C:attention}cards{}, {C:attention}poker hands{},',
+        '{C:attention}prices{}, {C:attention}rerolls{}, {C:attention}packs{}',
+        'Loadout {C:attention}repartitioned{}, deck rebuilt',
+        'with {C:attention}' .. tostring(pool.deck_min or '?') .. '-' .. tostring(pool.deck_max or '?') .. '{} random cards',
+        '{C:inactive}Flux Deck + Flux Sleeve, under the mutations',
+    }
+end
+
+-- Hover anywhere on the toggle: the container covers the label, and the checkbox is its own
+-- collidable element, so it needs the tooltip too.
+local function with_flux_tooltip(node)
+    local tip = { title = 'Flux', text = flux_text() }
+    node.config = node.config or {}
+    node.config.tooltip = tip
+    local function walk(n)
+        if n.config and n.config.button == 'toggle_button' then n.config.tooltip = tip end
+        for _, child in ipairs(n.nodes or {}) do walk(child) end
+    end
+    walk(node)
+    return node
+end
+
+-- The Flux Deck and Flux Sleeve together, as the base layer: mutations, the deck perk and the
+-- sleeve then land on the rolled loadout, as they would on any deck. The roll is not stashed
+-- for EndlessEngines' post-start_run re-apply, which would overwrite all of them.
+function EM.flux_apply()
+    if not flux_available() then return end
+    EEng.flux_activate()          -- Flux Deck: every value randomized
+    EEng.flux_destabilize(false)  -- Flux Sleeve on the Flux Deck: loadout and deck rerolled
+end
+
 local function best_mutation()
     local p = G.PROFILES and G.SETTINGS and G.PROFILES[G.SETTINGS.profile]
     return (p and p.em_best_mutation) or 0
@@ -901,25 +1013,42 @@ local function record_mutation_win()
     end
 end
 
-local function is_prismatic(key)
-    return type(key) == 'string' and key:find('prismatic', 1, true) ~= nil
+-- Vanilla decks and CardSleeves' own sleeves only. Modded ones (Flux, Gauntlet, Prismatic...)
+-- would stack with or contradict the mutations and the Flux toggle.
+local VANILLA_DECKS = {
+    b_red = true, b_blue = true, b_yellow = true, b_green = true, b_black = true,
+    b_magic = true, b_nebula = true, b_ghost = true, b_abandoned = true, b_checkered = true,
+    b_zodiac = true, b_painted = true, b_anaglyph = true, b_plasma = true, b_erratic = true,
+}
+
+-- True if a deck or sleeve would start the run holding a card the mutations ban (the Magic
+-- deck and sleeve's Fools under No Magic), which would hand out exactly what was banned.
+local function starts_banned(config, banned)
+    for _, k in ipairs(config and config.consumables or {}) do
+        local c = G.P_CENTERS[k]
+        if c and banned[c.set] then return true end
+    end
+    return false
 end
 
-local function random_deck()
+local function random_deck(banned)
     local pool = {}
     for _, v in ipairs(G.P_CENTER_POOLS.Back or {}) do
-        if v.unlocked and not v.omit and not is_prismatic(v.key) then pool[#pool + 1] = v end
+        if v.unlocked and VANILLA_DECKS[v.key] and not starts_banned(v.config, banned) then
+            pool[#pool + 1] = v
+        end
     end
     if #pool == 0 then return G.P_CENTERS.b_red end
     return pool[math.random(1, #pool)]
 end
 
-local function random_sleeve_key()
+local function random_sleeve_key(banned)
     if not CardSleeves then return nil end
     local pool = {}
     for _, s in pairs(G.P_CENTER_POOLS.Sleeve or {}) do
-        if s.key and s.key ~= 'sleeve_casl_none' and not is_prismatic(s.key)
-            and (type(s.is_unlocked) ~= 'function' or s:is_unlocked()) then
+        if s.key and s.key:find('^sleeve_casl_') and s.key ~= 'sleeve_casl_none'
+            and (type(s.is_unlocked) ~= 'function' or s:is_unlocked())
+            and not starts_banned(s.config, banned) then
             pool[#pool + 1] = s.key
         end
     end
@@ -937,15 +1066,22 @@ local em_finish_pending = false
 
 G.FUNCS.em_start_mutation = function(e)
     if G.OVERLAY_MENU then G.FUNCS.exit_overlay_menu() end
-    local deck  = random_deck()
+    -- Mutations first: the deck and sleeve are picked around what they ban.
+    local count = mutation_count()
+    local keys = EM.roll_mutations(count)
+    local banned = {}
+    for _, k in ipairs(keys) do
+        for _, set in ipairs(EM.MUT_BY_KEY[k] and EM.MUT_BY_KEY[k].bans or {}) do banned[set] = true end
+    end
+    local deck  = random_deck(banned)
     local stake = math.random(STAKE_MIN, STAKE_MAX)
     if CardSleeves then -- If CardSleeves installed
-        local sk = random_sleeve_key()
+        local sk = random_sleeve_key(banned)
         if sk then G.viewed_sleeve = sk end
     end
     if G.GAME then G.GAME.viewed_back = Back(deck) end
-    local count = mutation_count()
-    em_pending = { count = count, keys = EM.roll_mutations(count) }
+    em_pending = { count = count, keys = keys,
+                   flux = EM.mutation_cfg.flux == true and flux_available() }
     G.FUNCS.start_run(e, { stake = stake, deck = deck })
 end
 
@@ -956,9 +1092,11 @@ function Back:apply_to_run(...)
         G.GAME.em_mutation = true
         G.GAME.em_mutation_count = em_pending.count
         G.GAME.em_mutations = em_pending.keys
+        G.GAME.em_flux = em_pending.flux or nil
         em_pending = nil
         em_finish_pending = true
         ours = true
+        if G.GAME.em_flux then EM.flux_apply() end   -- base layer, under the mutations
         EM.mutations_apply()   -- before the deck perk below
     end
     local ret = em_apply_to_run(self, ...)
@@ -1017,12 +1155,20 @@ local function erratic_box(from_game_over)
             }},
         }},
         { n = G.UIT.R, config = { align = 'cm', padding = 0.05 }, nodes = {
-            UIBox_button({
-                label = { 'Mutation List' },
-                button = 'em_mutation_list',
-                colour = G.C.GREY,
-                minw = 3, scale = 0.3, minh = 0.4,
-            }),
+            { n = G.UIT.C, config = { align = 'cm', padding = 0.05 }, nodes = {
+                UIBox_button({
+                    label = { 'Mutation List' },
+                    button = 'em_mutation_list',
+                    colour = G.C.GREY,
+                    minw = 3, scale = 0.3, minh = 0.4,
+                }),
+            }},
+            flux_available() and with_flux_tooltip({ n = G.UIT.C, config = { align = 'cm', padding = 0.05 }, nodes = {
+                create_toggle({
+                    label = 'Flux', ref_table = EM.mutation_cfg, ref_value = 'flux',
+                    col = true, w = 0.8, scale = 0.8, label_scale = 0.35, active_colour = G.C.BLUE,
+                }),
+            }}) or nil,
         }},
     }}
 end
@@ -1035,7 +1181,7 @@ local function strip_markup(s)
     return (tostring(s or ''):gsub('{[^}]*}', ''))
 end
 
-local CAT_COLOUR = { Challenge = G.C.RED, Boon = G.C.GREEN, Twist = G.C.PURPLE }
+local CAT_COLOUR = { Challenge = G.C.RED, Boon = G.C.GREEN, Twist = G.C.PURPLE, Flux = G.C.BLUE }
 local function mutation_entry_rows(mt)
     local rows = {}
     rows[#rows + 1] = { n = G.UIT.R, config = { align = 'cl', padding = 0.015 }, nodes = {
@@ -1121,9 +1267,15 @@ end
 --============================================================
 -- View Deck: the Mutations tab
 --============================================================
+local function flux_entry()
+    return { name = 'Flux', category = 'Flux', text = flux_text() }
+end
+
 function G.UIDEF.em_mutations_tab(args)
     local rows = {}
-    for _, mt in ipairs(EM.mutation_list()) do
+    local list = EM.mutation_list()
+    if G.GAME and G.GAME.em_flux then table.insert(list, 1, flux_entry()) end
+    for _, mt in ipairs(list) do
         rows[#rows + 1] = { n = G.UIT.R, config = { align = 'cm', padding = 0.04 }, nodes = {
             { n = G.UIT.T, config = { text = mt.name, scale = 0.4,
                                       colour = CAT_COLOUR[mt.category] or G.C.PURPLE, shadow = true } },
@@ -1144,8 +1296,8 @@ end
 
 local em_deck_info = G.UIDEF.deck_info
 function G.UIDEF.deck_info(_show_remaining)
-    if not (G.GAME and G.GAME.em_mutation and G.GAME.em_mutations
-            and #G.GAME.em_mutations > 0) then
+    if not (G.GAME and G.GAME.em_mutation
+            and ((G.GAME.em_mutations and #G.GAME.em_mutations > 0) or G.GAME.em_flux)) then
         return em_deck_info(_show_remaining)
     end
     local tabs = _show_remaining and {
